@@ -3,7 +3,7 @@
 #include once "crt/math.bi"
 
 Enum NeuronActivation
-	SAME
+	SAME = 0
 	RELU
 	lRELU
 	nRELU
@@ -35,37 +35,53 @@ Type NNetwork
 	layer as long ptr=0			' Array of count of neurons for each layer
 	layers as long				' Count of layers
 	layer_i as long ptr=0		' index/starting neuron for each layer
+	
 	bias as long				' Bias used
 	memory as long				' Memory used
 
-	as integer ptr		acs_fnc_ptr
-	as integer ptr		acs_fncder_ptr
+	thdW as single ptr = 0
+	layer_wc as long ptr = 0
+	
+	as single gradW
+
+
+	as long ptr layer_a =0		' Functuion for each layer
+	as integer ptr ptr		acs_fnc_ptr = 0
+	as integer ptr ptr		acs_fncder_ptr = 0
 	
 	declare sub 		Create(layer() as long, layers as long, bias as long=0, mem as long=0, nolinks as long = 0)
-	declare sub 		Activation(act as NeuronActivation)
+	declare sub 		Activation(act as NeuronActivation, sel_layer as long = -1)
 	declare sub 		Destroy()
-	declare sub 		Clear()
+	declare sub 		Clear(clearmem as long=0)
 	declare sub 		ClearDelta()
 	declare sub 		ClearDeltaSumm()
-	declare sub 		Tick()
+	declare sub 		Tick(start_layer as long = 0)
+	declare sub 		threadPrepareData()
+	declare sub 		TickMT(threads as long=2)
 	declare sub 		Randomize(v1 as single, v2 as single, memr as single=0)
 	declare sub 		LimitWeights(l1 as long, l2 as long, v1 as single=-2, v2 as single=2)
-	declare sub 		Copy( dst as NNetwork)
+	declare sub 		LimitDeltaSpeed(l1 as long, l2 as long, v1 as single=-2, v2 as single=2)
+	declare sub 		Copy(dst as NNetwork)
+	declare sub 		AvgWith(src as NNetwork)
 	declare sub 		Crossing(byref b1 as NNetwork, byref  b2 as NNetwork, chance as single=0.03, mutaion as double=0.0)
 	declare sub 		Round(offset as single = 0.00001)
 	declare sub 		Mutate(mutaion as single=0.0)
+	declare sub			RemoveUnused()
+	declare sub			Conv2D(n_layer as long, sw as long, sh as long, svec_size as long, dw as long, dh as long, dvec_size as long, rad as single = 2)
+	declare sub 		KeepOnlyWeights(layer as long=0, max as long=1)
+	declare sub 		OptimizeWeights(layer_idx as long=0, prec as single = 0.5)
 	declare sub 		Interpolate(byref b1 as NNetwork, byref b2 as NNetwork, k as single)
-	declare sub 		BackPropogation(targets as single ptr, norm_err as long = 0, layers_back as long = 999)
-	declare sub 		GradientDescent(sample_count as long=1, learn_rate as single=0.1, inertia_k as single=0, layers_back as long = 999)
-	declare function 	Out() as Neuron ptr
+	declare sub  		PassErrorFrom( src as NNetwork, Weights as single ptr )
+	declare sub 		BackPropogation(targets as single ptr, norm_err as long = 0, layers_back as long = 999, no_gradient as long =0, include_layer0 as long=0, noerr as long = 0, gradientW as single = 1)
+	declare sub 		GradientDescent(learn_rate as single=0.1, inertia_k as single=0, layers_back as long = 999)
+	declare function 	Out(out_layer as long = -1) as Neuron ptr
 	declare sub  		Save(filename as string)
 	declare function 	Load(filename as string) as long
-
+	declare function 	WeightsCount() as long
 
 
 	declare function 	AddNeuron(sel_layer as long, rnd_weights as single = 0.001) as long
 	
-	declare sub  		SimplifyWeights(k as single=0.1)
 	declare function  	CountWeights() as long	
 End Type
 
@@ -73,9 +89,10 @@ End Type
 
 type nnmaskfnc as function(x as single) as single
 
-CONST as long nnetwork_version = 3
+CONST as long nnetwork_version = 4
+CONST as long nnetwork_min_version = 3
 
-dim shared as Randomizer grnd = 1048576
+dim shared as Randomizer nn_rnd = 1048576
 
 
 function nns_same(x as single) as single
@@ -84,7 +101,6 @@ end function
 function nns_same_der(x as single) as single
 	return 1
 end function
-
 
 Function nns_ReLU(x As single) As single
     If x > 0 Then
@@ -102,17 +118,17 @@ Function nns_ReLU_der(x As single) As single
 End Function
 
 function nns_lReLU(x as single) as single
-    if x < 0 then
-        return 0.01 * x
-    else
+    if x >= 0 then
         return x
+    else
+        return 0.01 * x
     end if
 end function
 function nns_lReLU_der(x as single) as single
-    if x < 0 then
-        return 0.01
-    else
+    if x >= 0 then
         return 1
+    else
+        return 0.01
     end if
 end function
 
@@ -158,27 +174,43 @@ function NNetwork_Compare(b1 as NNetwork, b2 as NNetwork) as long
 	return 0
 end function
 
-sub NNetwork.Activation(act as NeuronActivation)
-	select case act
-	case SAME
-		this.acs_fnc_ptr = cast(integer ptr, @nns_same)
-		this.acs_fncder_ptr = cast(integer ptr, @nns_same_der)
-	case RELU
-		this.acs_fnc_ptr = cast(integer ptr, @nns_ReLU)
-		this.acs_fncder_ptr = cast(integer ptr, @nns_ReLU_der)
-	case lRELU
-		this.acs_fnc_ptr = cast(integer ptr, @nns_lReLU)
-		this.acs_fncder_ptr = cast(integer ptr, @nns_lReLU_der)
-	case nRELU
-		this.acs_fnc_ptr = cast(integer ptr, @nns_nReLU)
-		this.acs_fncder_ptr = cast(integer ptr, @nns_nReLU_der)
-	case TANHENT
-		this.acs_fnc_ptr = cast(integer ptr, @nns_tanh)
-		this.acs_fncder_ptr = cast(integer ptr, @nns_tanh_der)
-	case SIGMOID
-		this.acs_fnc_ptr = cast(integer ptr, @nns_sigmoid)
-		this.acs_fncder_ptr = cast(integer ptr, @nns_sigmoid_der)
-	end select
+sub NNetwork.Activation(act as NeuronActivation, sel_layer as long = -1)
+
+	if sel_layer=-1 then 
+		if this.layer_a then deallocate(this.layer_a)
+		if this.acs_fnc_ptr then deallocate(this.acs_fnc_ptr)
+		if this.acs_fncder_ptr then deallocate(this.acs_fncder_ptr)
+		
+		this.layer_a = callocate( this.layers, sizeof(long) )
+		this.acs_fnc_ptr = callocate( this.layers, sizeof(integer) )
+		this.acs_fncder_ptr = callocate( this.layers, sizeof(integer) )
+	end if
+	
+	for n as long = 0 to this.layers - 1
+		if sel_layer=-1 or sel_layer=n then 
+			this.layer_a[n] = act
+			select case act
+			case SAME
+				this.acs_fnc_ptr[n] = cast(integer ptr, @nns_same)
+				this.acs_fncder_ptr[n] = cast(integer ptr, @nns_same_der)
+			case RELU
+				this.acs_fnc_ptr[n] = cast(integer ptr, @nns_ReLU)
+				this.acs_fncder_ptr[n] = cast(integer ptr, @nns_ReLU_der)
+			case lRELU
+				this.acs_fnc_ptr[n] = cast(integer ptr, @nns_lReLU)
+				this.acs_fncder_ptr[n] = cast(integer ptr, @nns_lReLU_der)
+			case nRELU
+				this.acs_fnc_ptr[n] = cast(integer ptr, @nns_nReLU)
+				this.acs_fncder_ptr[n] = cast(integer ptr, @nns_nReLU_der)
+			case TANHENT
+				this.acs_fnc_ptr[n] = cast(integer ptr, @nns_tanh)
+				this.acs_fncder_ptr[n] = cast(integer ptr, @nns_tanh_der)
+			case SIGMOID
+				this.acs_fnc_ptr[n] = cast(integer ptr, @nns_sigmoid)
+				this.acs_fncder_ptr[n] = cast(integer ptr, @nns_sigmoid_der)
+			end select
+		end if
+	next
 end sub
 
 sub NNetwork.Interpolate(byref b1 as NNetwork, byref b2 as NNetwork, k as single)
@@ -193,9 +225,13 @@ sub NNetwork.Mutate(mutaion as single=0.0)
 	for n as long =0 to this.NRc-1
 		for m as long =0 to this.NR[n].nc-1
 			this.NR[n].W[m] += (rnd-0.5)*mutaion
+'			if this.NR[n].W[m]<-2 then this.NR[n].W[m]=-2
+'			if this.NR[n].W[m]>2 then this.NR[n].W[m]=2
 		next
 		if this.memory then
 			this.NR[n].mem += (rnd-0.5)*mutaion
+			if this.NR[n].mem <0 then this.NR[n].mem =0
+			if this.NR[n].mem >0.999 then this.NR[n].mem =0.999
 		end if
 	next 
 end sub
@@ -215,74 +251,305 @@ end sub
 sub NNetwork.Crossing(byref b1 as NNetwork, byref  b2 as NNetwork, chance as single=0.03, mutaion as double=0.0)
 	for n as long =0 to this.NRc-1
 		for m as long =0 to this.NR[n].nc-1
-			if grnd.Value<0.5 then
+			if nn_rnd.Value<0.5 then
 				this.NR[n].W[m] = b1.NR[n].W[m]
 			else
 				this.NR[n].W[m] = b2.NR[n].W[m]
 			end if
-			if grnd.Value<chance then
-				this.NR[n].W[m] = cdbl(this.NR[n].W[m]) + (grnd.Value-0.5)*mutaion
+			if nn_rnd.Value<chance then
+				this.NR[n].W[m] = cdbl(this.NR[n].W[m]) + (nn_rnd.Value-0.5)*mutaion
 			end if
 		next
 		if this.memory then
-			if grnd.Value<0.5 then
+			if nn_rnd.Value<0.5 then
 				this.NR[n].mem = b1.NR[n].mem
 			else
 				this.NR[n].mem = b2.NR[n].mem
 			end if
-			if grnd.Value<chance then
-				this.NR[n].mem += (grnd.Value-0.5)*mutaion
+			if nn_rnd.Value<chance then
+				this.NR[n].mem += (nn_rnd.Value-0.5)*mutaion
 			end if
 		end if
 	next 
 end sub
 
-Sub NNetwork.Tick()
+
+
+sub NNetwork.RemoveUnused()
+	for n as long = 0 to this.NRc - 1
+		dim as long i=0
+		for m as long = 0 to this.NR[n].nc - 1
+			if this.NR[n].L[m]<>-1 then
+				this.NR[n].L[i] = this.NR[n].L[m]
+				this.NR[n].W[i] = this.NR[n].W[m]
+				i+=1
+			end if
+		next
+		this.NR[n].nc = i
+	next
+end sub
+
+
+sub NNetwork.Conv2D(n_layer as long, sW as long, sH as long, svec_size as long, dW as long, dH as long, dvec_size as long, rad as single = 2)
+
+	dim as single kx=sW/dW, ky=sH/dH, dx,dy
+	dim as long i = this.layer_i[n_layer]
+	for y as long = 0 to sH-1
+		for x as long = 0 to (sW*svec_size)-1
+			for m as long = 0 to this.NR[i].nc - 1
+				dx = ((m\dvec_size) mod dW) * kx
+				dy = ((m\dvec_size) \ dW) * ky
+				if sqr( ((x\svec_size)-dx)^2 + (y-dy)^2 ) > rad then
+					this.NR[i].L[m] = -1 ' remove link
+				end if
+			next
+			
+			i+=1
+		next
+	next
+
+end sub
+
+
+sub NNetwork.KeepOnlyWeights(layer_idx as long, lmax as long)
+	dim as long i = this.layer_i[layer_idx], c = iif( this.bias, this.layer[layer_idx]-1, this.layer[layer_idx])
+
+	for n as long = i to i+c - 1
+		
+		for l as long = 0 to lmax - 1 'this.NR[i].nc - 1
+			dim as single maxw=0
+			dim as long maxi=0
+			for m as long = 0 to this.NR[n].nc - 1
+				if abs(this.NR[n].W[m])>maxw then 
+					maxw = abs(this.NR[n].W[m])
+					maxi=m
+				end if				
+			next
+			
+			swap this.NR[n].W[l], this.NR[n].W[maxi]
+			swap this.NR[n].L[l] , this.NR[n].L[maxi]
+		next
+		this.NR[n].nc = lmax
+		
+		'? this.NR[i].nc 
+	next
+end sub
+
+sub NNetwork.OptimizeWeights(layer_idx as long=0, prec as single = 0.5)
+	dim as long i = this.layer_i[layer_idx], c = iif( this.bias, this.layer[layer_idx]-1, this.layer[layer_idx])
+	dim as long lmax
+	
+	for n as long = i to i+c - 1
+		
+		lmax = prec*this.NR[n].nc
+		if lmax<1 then lmax=1
+		if lmax>this.NR[n].nc-1 then lmax=this.NR[n].nc-1
+		
+		for l as long = 0 to lmax - 1 'this.NR[i].nc - 1
+			dim as single maxw=0
+			dim as long maxi=0
+			for m as long = 0 to this.NR[n].nc - 1
+				if abs(this.NR[n].W[m])>maxw then 
+					maxw = abs(this.NR[n].W[m])
+					maxi=m
+				end if				
+			next
+			
+			swap this.NR[n].W[l], this.NR[n].W[maxi]
+			swap this.NR[n].L[l] , this.NR[n].L[maxi]
+		next
+		this.NR[n].nc = lmax
+		
+		'? this.NR[i].nc 
+	next
+end sub
+
+
+function NNetwork.WeightsCount() as long 
+	dim as long c=0
+	for n as long = 0 to this.NRc-1
+		c += this.NR[n].nc
+	next
+	return c
+end function
+
+
+type calc_thead_t
+	as any ptr thd
+
+	as long n1, n2, exist
+	as single ptr wcl
+end type
+
+
+Sub tdr_CalcOut(ByVal ud As Any PTR)
+	dim as calc_thead_t ptr 	ctt = cast(calc_thead_t ptr , ud)
+	for n as long = ctt->n1 to ctt->n2
+		ctt->wcl[n*4+2] = ctt->wcl[n*4+0] * ctt->wcl[n*4+1]
+	next
+end sub
+
+sub NNetwork.threadPrepareData()
+
+	this.layer_wc = allocate( this.layers * 4)
+	dim as long maxw=0
+	for l as long =0 to this.layers-2
+		dim as long wcnt=0, i, w, oi
+		i = this.layer_i[l]
+		for n as long = i to i+this.layer[l] -1
+			wcnt += this.NR[n].nc
+		next
+		this.layer_wc[l]=wcnt
+		if wcnt>maxw then maxw = wcnt 
+	next
+	
+	
+	this.thdW = allocate(maxw*4*sizeof(single))
+	
+end sub
+
+Sub NNetwork.TickMT(threads as long=2)
+
+	dim as calc_thead_t 	td()
+
+	for l as long =0 to this.layers-2
+		dim as long i, w, oi
+		i = this.layer_i[l]
+
+		w = 0
+		for n as long = i to i+this.layer[l] -1
+			for m as long = 0 to this.NR[n].nc - 1
+				this.thdW[w+0] = this.NR[n].signal
+				this.thdW[w+1] = this.NR[n].W[m]
+				this.thdW[w+2] = 0
+				w+=4
+			next
+		next
+		
+		redim td(threads-1)
+		dim as long ll = ( this.layer_wc[l] -1)/threads, i1=0, i2
+		if ll<1 then ll=1
+		for t as long = 0 to threads-1
+			i2 = int(i1+ll-1)
+			if t=threads-1 then i2 = this.layer_wc[l]-1
+			if i2>this.layer_wc[l]-1 then i2=this.layer_wc[l]-1
+			td(t).n1 = i1
+			td(t).n2 = i2
+			td(t).wcl = this.thdW
+			td(t).exist = 1
+			i1= i2+1
+			if i1>this.layer_wc[l]-1 then exit for
+		next
+		for t as long = 0 to threads-1
+			if td(t).exist then td(t).thd = threadcreate(@tdr_CalcOut, @td(t))
+		next
+		for t as long = 0 to threads-1
+			if td(t).exist then threadwait(td(t).thd)
+		next
+		
+		i = 0
+		for n as long = this.layer_i[l] to this.layer_i[l]+this.layer[l] -1
+			' суммируем сигналы текущего слоя
+			' в каждый элементследущего слоя
+			for m as long = 0 to this.NR[n].nc-1
+				oi = this.NR[n].L[m]
+				this.NR[oi].signal += this.thdW[i+2]
+				i+=4
+			next
+		next
+		
+		
+		dim as long k = this.layer_i[l+1]
+		for n as long = 0 to this.layer[l+1] - iif(this.bias,2,1)
+			this.NR[k].signal = cast(nnmaskfnc, this.acs_fnc_ptr[l+1])(this.NR[k].signal)
+			k+=1
+		next
+		
+
+	next
+end sub
+
+Sub NNetwork.Tick(start_layer as long = 0)
 	dim as long i = 0, oi, k
 	dim as single t
 	
+	dim as nnmaskfnc acs_fnc
+	dim as single  sgl
+	dim as long ptr ll
+	dim as single ptr ww
 	if this.memory then 
-		for l as long =0 to this.layers-2
+		for l as long = start_layer to this.layers-2
+			i = this.layer_i[l]
 			for n as long = 0 to this.layer[l] -1
+				sgl = this.NR[i].signal
+				ll = this.NR[i].L
+				ww = this.NR[i].W
 				for m as long = 0 to this.NR[i].nc-1
-					oi = this.NR[i].L[m]
-					this.NR[oi].tmp_signal += this.NR[i].signal * this.NR[i].W[m]
+					this.NR[*ll].tmp_signal += sgl * (*ww)
+					ll+=1
+					ww+=1
 				next
 				i +=1
 			next
 			k = this.layer_i[l+1]
+			acs_fnc =  cast(nnmaskfnc, this.acs_fnc_ptr[l+1])
+			dim as single ns
 			for n as long = 0 to this.layer[l+1] - iif(this.bias,2,1)
-				'this.NR[k].signal = this.NR[k].signal*this.NR[k].mem + NNAct(this.NR[k].tmp_signal)*(1-this.NR[k].mem)
-				this.NR[k].signal = this.NR[k].signal*this.NR[k].mem + cast(nnmaskfnc, this.acs_fnc_ptr)(this.NR[k].tmp_signal)*(1-this.NR[k].mem)
+				'this.NR[k].signal = this.NR[k].signal*this.NR[k].mem + acs_fnc(this.NR[k].tmp_signal)*(1-this.NR[k].mem)
+				ns = acs_fnc(this.NR[k].tmp_signal)
+				this.NR[k].signal = ns + (this.NR[k].signal - ns) * this.NR[k].mem
 				k+=1
 			next
 		next
+		
 	else
-		for l as long =0 to this.layers-2
+		for l as long = start_layer to this.layers-2
+			i = this.layer_i[l]
 			for n as long = 0 to this.layer[l] -1
+				sgl = this.NR[i].signal
+				ll = this.NR[i].L
+				ww = this.NR[i].W
 				for m as long = 0 to this.NR[i].nc-1
-					oi = this.NR[i].L[m]
-					this.NR[oi].signal += this.NR[i].signal * this.NR[i].W[m]
+					this.NR[*ll].signal += sgl * (*ww)
+					ll+=1
+					ww+=1
 				next
 				i +=1
 			next
-			k = this.layer_i[l+1]
+			acs_fnc =  cast(nnmaskfnc, this.acs_fnc_ptr[l+1])
+			dim as long k = this.layer_i[l+1]
 			for n as long = 0 to this.layer[l+1] - iif(this.bias,2,1)
-				'this.NR[k].signal = NNAct(this.NR[k].signal)
-				this.NR[k].signal = cast(nnmaskfnc, this.acs_fnc_ptr)(this.NR[k].signal)
+				this.NR[k].signal = acs_fnc(this.NR[k].signal)
 				k+=1
 			next
 		next
+		
+'		for l as long =0 to this.layers-2
+'			for n as long = 0 to this.layer[l] -1
+'				for m as long = 0 to this.NR[i].nc-1
+'					oi = this.NR[i].L[m]
+'					this.NR[oi].signal += this.NR[i].signal * this.NR[i].W[m]
+'				next
+'				i +=1
+'			next
+'			k = this.layer_i[l+1]
+'			for n as long = 0 to this.layer[l+1] - iif(this.bias,2,1)
+'				this.NR[k].signal = cast(nnmaskfnc, this.acs_fnc_ptr[l+1])(this.NR[k].signal)
+'				k+=1
+'			next
+'		next
+		
 	end if
 	
 End Sub
 
-sub NNetwork.Clear()
+sub NNetwork.Clear(clearmem as long=0)
 	dim i as long=this.layer_i[0]
 	for n as long =0 to this.layers-1
 		if this.memory then 
 			for m as long=0 to this.layer[n] -1
 				this.NR[i].tmp_signal = 0
+				if clearmem then this.NR[i].signal = 0
 				i+=1
 			next
 		else
@@ -295,6 +562,7 @@ sub NNetwork.Clear()
 	next
 end sub
 sub NNetwork.ClearDelta()
+	this.gradW = 0
 	for n as long =0 to this.NRc - 1
 		for m as long = 0 to this.NR[n].nc-1
 			this.NR[n].delta[m] = 0
@@ -309,8 +577,12 @@ sub NNetwork.ClearDeltaSumm()
 	next
 end sub
 
-function NNetwork.Out() as Neuron ptr
-	return @this.NR[this.layer_i[this.layers-1]]
+function NNetwork.Out(out_layer as long = -1) as Neuron ptr
+	if out_layer=-1 then 
+		return @this.NR[this.layer_i[this.layers-1]]
+	else
+		return @this.NR[this.layer_i[out_layer]]
+	end if
 end function
 
 sub NNetwork.Copy(dst as NNetwork)
@@ -319,6 +591,16 @@ sub NNetwork.Copy(dst as NNetwork)
 		dst.NR[n].mem = this.NR[n].mem
 	next
 end sub
+
+sub NNetwork.AvgWith(src as NNetwork)
+	for n as long =0 to this.NRc-1
+		for m as long = 0 to this.NR[n].nc - 1
+			this.NR[n].W[m] = (this.NR[n].W[m] + src.NR[n].W[m])*0.5		
+		next
+	next
+end sub
+
+
 
 sub NNetwork.Randomize(v1 as single, v2 as single, memr as single=0)
 	for j as long = 0 to this.NRc-1
@@ -344,6 +626,19 @@ sub NNetwork.LimitWeights(l1 as long, l2 as long, v1 as single=-2, v2 as single=
 		next	
 	next
 end sub
+
+sub NNetwork.LimitDeltaSpeed(l1 as long, l2 as long, v1 as single=-2, v2 as single=2)
+	dim as long n
+	for l as long = l1 to l2
+		for n as long = this.layer_i[l] to this.layer_i[l]+this.layer[l]-1
+			for m as long = 0 to this.NR[n].nc-1
+				if this.NR[n].delta_speed[m]<v1 then this.NR[n].delta_speed[m]=v1
+				if this.NR[n].delta_speed[m]>v2 then this.NR[n].delta_speed[m]=v2
+			next		
+		next	
+	next
+end sub
+
 
 sub NNetwork.Destroy()
 	for n as long =0 to this.NRc-1
@@ -412,40 +707,84 @@ sub NNetwork.Create(nnlayer() as long, nnlayers as long, bias as long=0, mem as 
 	next
 end sub
 
+sub NNetwork.PassErrorFrom( src as NNetwork, weights as single ptr)
+	' weights count should be = to Neurons
+	' this.layer[this.layers-1] = src.layer[0]
+	
+	dim as long nc = this.layer[this.layers-1]
+	if this.bias then nc -= 1
 
-sub NNetwork.BackPropogation(targets as single ptr, norm_err as long = 0, layers_back as long = 999)
+	' calc err in last layer
+	dim as long i = this.layer_i[this.layers-1]
+	for n as long = 0 to nc-1
+		
+		' integral of error
+		this.NR[i].Er = weights[n] * src.NR[src.layer_i[0]+n].Er
+		i+=1
+	next
+	
+'	' normalazing
+'	dim as double hh,df
+'	i = this.layer_i[this.layers-1]
+'	for n as long = 0 to nc-1
+'		df += this.NR[i].Er*this.NR[i].Er
+'		i+=1
+'	next
+'	hh = sqr(df)
+	
+'	if hh>1 then 
+'	i = this.layer_i[this.layers-1]
+'	for n as long = 0 to nc-1
+'		this.NR[i].Er /= hh
+'		'? this.NR[i].Er
+'		i+=1
+'	next
+'	end if
+	
+end sub
+
+sub NNetwork.BackPropogation(targets as single ptr, norm_err as long = 0, layers_back as long = 999, no_gradient as long =0, include_layer0 as long=0, noerr as long = 0, gradientW as single = 1)
 	dim as single a = 0.1
 	dim as long lnkc, i, l
 	lnkc = this.layer[this.layers-1]
 	if this.bias then lnkc -= 1
-	i = this.layer_i[this.layers-1]
-	for n as long = 0 to lnkc-1
-		this.NR[i].Er = targets[n] - this.NR[i].signal
-		i+=1
-	next
+	
+	this.gradW += gradientW
+	
+	if noerr=0 then 
+		i = this.layer_i[this.layers-1]
+		for n as long = 0 to lnkc-1
+			this.NR[i].Er = targets[n] - this.NR[i].signal
+			i+=1
+		next
+	end if
+	
 	dim as long lb = 0
 	for k as long = this.layers-2 to 0 step -1
-		' calc gradient 
-		lnkc = this.layer[k+1]
-		if this.bias then lnkc -= 1
-		for n as long = 0 to lnkc-1
-			i = this.layer_i[k+1]+n
-			'this.NR[i].Gr = this.NR[i].Er * NNActInv(this.NR[i].signal)
-			this.NR[i].Gr = this.NR[i].Er * cast(nnmaskfnc, this.acs_fncder_ptr)(this.NR[i].signal)
-		next
-		
-		' weights deltas
-		lnkc = this.layer[k]
-		for n as long = 0 to lnkc-1
-			i = this.layer_i[k]+n
-			for m as long = 0 to this.NR[i].nc-1
-				l = this.NR[i].L[m]
-				this.NR[i].delta[m] += this.NR[l].Gr * this.NR[i].signal
+		if no_gradient=0 then 
+			' calc gradient 
+			lnkc = this.layer[k+1]
+			if this.bias then lnkc -= 1
+			for n as long = 0 to lnkc-1
+				i = this.layer_i[k+1]+n
+				'this.NR[i].Gr = this.NR[i].Er * NNActInv(this.NR[i].signal)
+				this.NR[i].Gr = this.NR[i].Er * cast(nnmaskfnc, this.acs_fncder_ptr[k+1])(this.NR[i].signal) * gradientW
 			next
-		next	
+			
+			' weights deltas
+			lnkc = this.layer[k]
+			for n as long = 0 to lnkc-1
+				i = this.layer_i[k]+n
+				for m as long = 0 to this.NR[i].nc-1
+					l = this.NR[i].L[m]
+					this.NR[i].delta[m] += this.NR[l].Gr * this.NR[i].signal
+				next
+			next
+		end if
 		
 		' ???? Is it needed for the first layer?
-		if k>0 then 
+		lnkc = this.layer[k]
+		if k>0 or include_layer0=1 then 
 			if this.bias then lnkc -= 1
 			for n as long = 0 to lnkc-1
 				i = this.layer_i[k]+n
@@ -467,9 +806,9 @@ sub NNetwork.BackPropogation(targets as single ptr, norm_err as long = 0, layers
 
 end sub
 
-sub NNetwork.GradientDescent(sample_count as long=1, learn_rate as single=0.1, inertia_k as single=0, layers_back as long = 999)
-	dim as single ik, k
-	ik = learn_rate / sample_count
+sub NNetwork.GradientDescent(learn_rate as single=0.1, inertia_k as single=0, layers_back as long = 999)
+	if this.gradW = 0 then return 
+	dim as double ik = learn_rate / this.gradW
 	dim as long start_l
 	start_l = this.layers - 1 - layers_back
 	if start_l<0 then start_l=0
@@ -478,6 +817,8 @@ sub NNetwork.GradientDescent(sample_count as long=1, learn_rate as single=0.1, i
 			for m as long = 0 to this.NR[n].nc-1
 				this.NR[n].delta_speed[m] = this.NR[n].delta_speed[m]*inertia_k  + this.NR[n].delta[m]*ik
 				this.NR[n].W[m] += this.NR[n].delta_speed[m]
+				'if abs(this.NR[n].delta[m])>0.2 then this.NR[n].delta[m] = 0.2*sgn(this.NR[n].delta[m])
+				'this.NR[n].W[m] += this.NR[n].delta[m]*ik
 			next		
 		next
 	next
@@ -491,10 +832,7 @@ sub NNetwork.Save(filename as string)
 	if len(dir(filename)) then kill(filename)
 	open filename for binary as #ff
 		put #ff,1, tp
-		
 		put #ff, , ver
-
-		
 		put #ff, , this.bias
 		put #ff, , this.memory
 		
@@ -519,6 +857,10 @@ sub NNetwork.Save(filename as string)
 			next	
 		end if
 		
+		for n as long = 0 to this.layers - 1
+			put #ff, , layer_a[n]
+		next
+		
 	close #ff
 end sub
 
@@ -533,7 +875,7 @@ function NNetwork.Load(filename as string) as long
 		get #ff,1, tp
 		if tp<>"NNET" then close #ff: return 2
 		get #ff, , vers
-		if vers<>nnetwork_version then close #ff: return 3
+		if vers<nnetwork_min_version then close #ff: return 3
 		
 		get #ff, , this.bias
 		get #ff, , this.memory
@@ -581,6 +923,18 @@ function NNetwork.Load(filename as string) as long
 			next			
 		end if
 		
+		if vers>=nnetwork_min_version then
+			if this.layer_a then deallocate(this.layer_a)
+			if this.acs_fnc_ptr then deallocate(this.acs_fnc_ptr)
+			if this.acs_fncder_ptr then deallocate(this.acs_fncder_ptr)
+			this.layer_a = callocate( this.layers, sizeof(long) )
+			this.acs_fnc_ptr = callocate( this.layers, sizeof(integer) )
+			this.acs_fncder_ptr = callocate( this.layers, sizeof(integer) )			
+			for n as long = 0 to this.layers -1
+				get #ff, , this.layer_a[n]
+				this.Activation( this.layer_a[n], n)
+			next
+		end if
 		
 	close #ff
 
@@ -649,41 +1003,6 @@ end function
 
 
 
-sub	NNetwork.SimplifyWeights(k as single=0.1)
-	dim as long ptr NrnInCnt = Callocate( this.NRc,  4)
-	for n as long = 0 to this.NRc-1
-		for l as long = 0 to this.NR[n].nc -1
-			NrnInCnt[this.NR[n].L[l]] += 1
-		next
-	next
-
-	for n as long = 0 to this.NRc-1
-		
-		dim as double avg=0
-		for l as long = 0 to this.NR[n].nc -1
-			avg += abs(this.NR[n].W[l])
-		next
-		avg /= this.NR[n].nc
-		avg *= k
-		
-		dim as long i = 0
-		for l as long = 0 to this.NR[n].nc -1
-			if abs(this.NR[n].W[l]) > avg or i<1 or NrnInCnt[this.NR[n].L[i]]<2 then
-				' keep this
-				this.NR[n].W[i] = this.NR[n].W[l]
-				this.NR[n].L[i] = this.NR[n].L[l]
-				i += 1
-			else
-				NrnInCnt[this.NR[n].L[i]] -= 1
-			end if
-		next
-		this.NR[n].nc = i
-		
-	next
-	
-	deallocate(NrnInCnt)
-end sub
-
 
 
 function NNetwork.CountWeights() as long
@@ -693,3 +1012,4 @@ function NNetwork.CountWeights() as long
 	next
 	return c
 end function
+
